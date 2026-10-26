@@ -1,1 +1,171 @@
+Q1. rows = []
+for _, r in df.iterrows():
+    p = process_ticket(r.Ticket_Text)
+    rows.append({
+        "Ticket_ID": r.Ticket_ID,
+        "Sentences": len(p["sentences"]),
+        "Tokens": len(p["tokens"]),
+        "Punctuation": len(p["punct"]),
+        "Stopwords": len(p["stops"]),
+        "Unique_Tokens": len(set(p["tokens"])),
+        "Final_Tokens": len(p["final"]),
+    })
+
+q1 = pd.DataFrame(rows)
+
+# TOTAL row
+total = {"Ticket_ID": "TOTAL"}
+for col in q1.columns[1:]:
+    total[col] = q1[col].sum()
+q1 = pd.concat([q1, pd.DataFrame([total])], ignore_index=True)
+
+print(q1.to_string(index=False))
+q1.to_csv(f"{ROLL_NO}_Q1_table.csv", index=False)
+
+------------------------------------------------------------------------------------------------------
+Q2.import re
+
+# ---------- extraction patterns ----------
+# words longer than 5 letters (the lookahead stops "couldn't" matching as "couldn")
+LONG_WORD   = re.compile(r"\b[A-Za-z]{6,}\b(?!['’])")
+
+# numbers: hex (0x80070005), thousands (1,000), decimals / dotted versions (95.5, 2.0.1), integers
+NUMBER      = re.compile(r"\b0[xX][0-9A-Fa-f]+\b"
+                         r"|(?<![A-Za-z0-9])\d{1,3}(?:,\d{3})+(?:\.\d+)?"
+                         r"|(?<![A-Za-z0-9])\d+(?:\.\d+)*")
+
+# capitalized words: Upper + lowercase letters (keeps Isn't / Alice's whole)
+CAPITALIZED = re.compile(r"\b[A-Z][a-z]+(?:['’][a-z]+)*\b")
+
+# words starting with a vowel (keeps e-mail, isn't whole)
+VOWEL_WORD  = re.compile(r"\b[aeiouAEIOU][A-Za-z]*(?:['’\-][A-Za-z]+)*\b")
+
+# ---------- masking patterns ----------
+EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+URL   = re.compile(r"(?:https?://|www\.)[^\s<>\"']*[^\s<>\"'.,;:!?)\]]")   # last char can't be punctuation
+PHONE = re.compile(r"(?<![\w.+\-])(?:\+\d{1,3}[\s\-]?)?"
+                   r"(?:\d{5}[\s\-]?\d{5}"                                 # mobile: 98765 43210, +91 98765 43210
+                   r"|\(?0\d{2,4}\)?[\s\-]?\d{3}[\s\-]?\d{3,4})(?!\w)")    # landline: 0175-239-3201
+
+def extract_all(text):
+    return {
+        "long_words":  LONG_WORD.findall(text),
+        "numbers":     NUMBER.findall(text),
+        "capitalized": CAPITALIZED.findall(text),
+        "vowel_words": VOWEL_WORD.findall(text),
+    }
+
+def mask(text):
+    text = EMAIL.sub("<EMAIL>", text)   # email first, so the domain isn't read as a URL
+    text = URL.sub("<URL>", text)
+    text = PHONE.sub("<PHONE>", text)
+    return text
+
+for tid, text in zip(df.Ticket_ID, df.Ticket_Text):
+    print(tid, "|", text)
+    for name, found in extract_all(text).items():
+        print(f"   {name:12}", found)
+    print("   masked      ", mask(text), "\n");
+---------------------------------------------------------------------------------------------------------------------------------
+Q4. import nltk, pandas as pd
+from collections import Counter, defaultdict
+from nltk.stem import PorterStemmer, LancasterStemmer, RegexpStemmer, WordNetLemmatizer
+from nltk.corpus import wordnet
+
+porter, lancaster = PorterStemmer(), LancasterStemmer()
+regex = RegexpStemmer(r"ing$|ed$|s$", min=4)     # rule chosen from the data (see below)
+lemmatizer = WordNetLemmatizer()
+
+def wn_pos(tag):
+    return {"J": wordnet.ADJ, "V": wordnet.VERB, "N": wordnet.NOUN, "R": wordnet.ADV}.get(tag[0], wordnet.NOUN)
+
+# POS-tag each ticket in context; keep the most common tag per final token
+tags = defaultdict(Counter)
+final_all = []
+for text in df.Ticket_Text:
+    p = process_ticket(text)
+    keep = set(p["final"])
+    for tok, tag in nltk.pos_tag(p["tokens"]):
+        if tok in keep:
+            tags[tok][tag] += 1
+    final_all += p["final"]
+
+unique_final = sorted(set(final_all))
+
+rows = []
+for w in unique_final:
+    tag = tags[w].most_common(1)[0][0]
+    rows.append({"Token": w, "POS": tag,
+                 "Porter": porter.stem(w),
+                 "Lancaster": lancaster.stem(w),
+                 "Regexp": regex.stem(w),
+                 "Lemma": lemmatizer.lemmatize(w, wn_pos(tag))})
+
+res = pd.DataFrame(rows)
+diff = res[res[["Porter", "Lancaster", "Regexp", "Lemma"]].nunique(axis=1) > 1]
+
+print(f"Unique final tokens: {len(res)}   Tokens where outputs differ: {len(diff)}\n")
+print(diff.to_string(index=False))
+res.to_csv(f"{ROLL_NO}_Q4_all.csv", index=False)
+diff.to_csv(f"{ROLL_NO}_Q4_differences.csv", index=False);
+
+------------------------------------------------------------------------------------------------------------------------------------
+Q5.
+# Q5. Corpus statistics
+from collections import Counter
+from nltk.stem import PorterStemmer
+from nltk.util import bigrams
+import numpy as np
+import matplotlib.pyplot as plt
+
+stemmer = PorterStemmer()
+
+# Build the four streams, keeping one list per ticket so bigrams don't cross ticket boundaries
+S1_t, S2_t, S3_t, S4_t = [], [], [], []
+for text in df["Ticket_Text"]:
+    out = process_ticket(text)
+    S1_t.append(out["tokens"])                                        # all tokens (lowercase)
+    S2_t.append([t for t in out["tokens"] if not is_punct(t)])        # no punctuation
+    S3_t.append(out["final"])                                         # no punctuation, no stopwords
+    S4_t.append([stemmer.stem(t) for t in out["final"]])              # S3 after Porter
+
+flat = lambda lists: [t for l in lists for t in l]
+S1, S2, S3, S4 = map(flat, (S1_t, S2_t, S3_t, S4_t))
+
+# Tokens, unique tokens, TTR
+stats = pd.DataFrame({
+    "Stream": ["S1 (all tokens)", "S2 (no punct)", "S3 (final)", "S4 (S3 + Porter)"],
+    "Tokens": [len(s) for s in (S1, S2, S3, S4)],
+    "Unique": [len(set(s)) for s in (S1, S2, S3, S4)],
+})
+stats["TTR"] = (stats["Unique"] / stats["Tokens"]).round(4)
+print(stats.to_string(index=False))
+
+# Top 10 words of S1 and S3
+c1, c3 = Counter(S1), Counter(S3)
+print("\nTop 10 words, S1:")
+for w, n in c1.most_common(10): print(f"  {w!r:15} {n}")
+print("\nTop 10 words, S3:")
+for w, n in c3.most_common(10): print(f"  {w!r:15} {n}")
+
+# Zipf plot for S3: log(rank) vs log(frequency)
+freqs = sorted(c3.values(), reverse=True)
+ranks = np.arange(1, len(freqs) + 1)
+plt.figure(figsize=(6, 4))
+plt.plot(np.log(ranks), np.log(freqs), "o-")
+plt.xlabel("log(rank)")
+plt.ylabel("log(frequency)")
+plt.title("Zipf plot, S3 (final tokens)")
+plt.grid(alpha=0.3)
+plt.show()
+
+# Top 5 bigrams of S1 and S3 (built within each ticket)
+def top_bigrams(lists, k=5):
+    c = Counter(bg for l in lists for bg in bigrams(l))
+    return c.most_common(k)
+
+print("\nTop 5 bigrams, S1:")
+for bg, n in top_bigrams(S1_t): print(f"  {bg} {n}")
+print("\nTop 5 bigrams, S3:")
+for bg, n in top_bigrams(S3_t): print(f"  {bg} {n}");
 
